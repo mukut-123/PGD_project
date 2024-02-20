@@ -1,0 +1,119 @@
+#HA Cluster Configuration CentOS 7:
+#Environment:
+#Here, we will configure a failover cluster with Pacemaker to make the Apache (web) server as a highly available application.
+#Here, we will configure the Apache web server, filesystem, and networks as resources for our cluster.
+#For a filesystem resource, we would be using shared storage coming from iSCSI storage.
+#CentOS 7 High Availability Cluster Infrastructure
+#Host Name			         IP Address		    OS		    Purpose
+#node1.demo.lab	      192.168.1.126		CentOS 7	Cluster Node 1
+#node2.demo.lab	      192.168.1.119		CentOS 7	Cluster Node 2
+#storage.demo.lab	    192.168.1.109		CentOS 7	iSCSI Shared Storage
+#virtualhost.demo.lab	192.168.1.112		CentOS 7	Virtual Cluster IP (Apache)
+#on storage:
+yum install targetcli lvm2
+#on nodes:
+yum install -y iscsi-initiator-utils lvm2
+#on storage:
+yum install -y targetcli lvm2 iscsi-initiator-utils lvm2
+fdisk -l | grep -i sd   -----list the available disks in the iSCSI server
+#create an LVM on the iSCSI server to use as shared storage for our cluster nodes.
+pvcreate /dev/sdb
+vgcreate vg_iscsi /dev/sdb
+lvcreate -l 100%FREE -n lv_iscsi vg_iscsi
+#Node 1:
+cat /etc/iscsi/initiatorname.iscsi
+##InitiatorName=iqn.1994-05.com.redhat:121c93cbad3a
+#Node 2:
+cat /etc/iscsi/initiatorname.iscsi
+##InitiatorName=iqn.1994-05.com.redhat:827e5e8fecb
+#Enter the below command to get an iSCSI CLI for an interactive prompt.
+#on storage:
+targetcli
+cd /backstores/block
+create iscsi_shared_storage /dev/vg_iscsi/lv_iscsi -----Created block storage object iscsi_shared_storage using /dev/vg_iscsi/lv_iscsi.
+cd /iscsi
+create   ------(Created target iqn.2003-01.org.linux-iscsi.storage.x8664:sn.eac9425e5e18.
+                Created TPG 1.
+                Global pref auto_add_default_portal=true
+                Created default portal listening on all IPs (0.0.0.0), port 3260.)
+cd <iqn.2003-01.org.linux-iscsi.storage.x8664:sn.eac9425e5e18>/tpg1/acls  ----< Change as per the output of previous command>
+create iqn.1994-05.com.redhat:121c93cbad3a -----<< Node 1>>
+create iqn.1994-05.com.redhat:827e5e8fecb ------<< Node 2>>
+cd /iscsi/<iqn.2003-01.org.linux-iscsi.storage.x8664:sn.eac9425e5e18>/tpg1/luns
+create /backstores/block/iscsi_shared_storage ------(Created LUN 0.
+                                                      Created LUN 0->0 mapping in node ACL iqn.1994-05.com.redhat:827e5e8fecb
+                                                      Created LUN 0->0 mapping in node ACL iqn.1994-05.com.redhat:121c93cbad3a)
+cd /
+ls
+saveconfig
+exit
+systemctl enable target
+systemctl restart target
+firewall-cmd --permanent --add-port=3260/tcp
+firewall-cmd --reload
+#Both Nodes:
+iscsiadm -m discovery -t st -p <ip of storage machine>
+iscsiadm -m node -T <iqn.2003-01.org.linux-iscsi.storage.x8664:sn.73638ebfea25> <192.168.144.202> -l ----iqn and ip of storage machine
+lsblk
+#Node1:
+pvcreate /dev/sdb
+vgcreate vg_apache /dev/sdb
+lvcreate -n lv_apache -l 100%FREE vg_apache
+#Node2:
+pvscan
+vgscan
+lvscan
+lvdisplay /dev/vg_apache/lv_apache
+#Both nodes:
+vi /etc/hosts ---add ip address and hostnames of both nodes
+yum-config-manager --set-enabled HighAvailability
+yum install -y pcs fence-agents-all pcp-zeroconf
+firewall-cmd --permanent --add-service=high-availability
+firewall-cmd --add-service=high-availability
+firewall-cmd --reload
+passwd hacluster
+systemctl start pcsd
+systemctl enable pcsd
+# node1:
+pcs cluster auth node1.lab node2.lab
+pcs cluster setup --name project_cluster --start node1.lab node2.lab
+pcs cluster enable --all
+pcs cluster status
+pcs status
+pcs property set stonith-enabled=false ----to disable fence devices
+#Both nodes:
+yum install -y httpd
+vim /etc/httpd/conf/httpd.conf ---(at the last copy following line)
+    <Location/server-status>
+      SetHandler server-status
+      Require local
+    </Location>
+/bin/systemclt reload httpd.sevice > /dev/null 2>/dev/null || true
+/usr/sbin/httpd -f /etc/httpd/conf/httpd.conf -c "PidFile /var/run/httpd.pid" -k graceful > /dev/null 2>/dev/null || true
+#node1:
+mount /dev/vg_apache/lv_apache /var/www/
+mkdir /var/www/html
+mkdir .var/www/cgi-bin
+mkdir /var/www/error
+restorecon -R /var/www
+cat <<-END >/var/www/html/index.html ----(in file copy the following code)
+  <html>
+  <body>Hello, Welcome! this page is for project by HPCSA group no.1</body>
+  </html>
+  END
+cat /var/www/html/index.html
+unmount /var/www
+
+#Both nodes:
+firewall-cmd --permanent --add-service=http
+firewall-cmd --reload
+#node1:
+pcs resource create httpd_fs Filesystem device="/dev/mapper/vg_apache-lv_apache" directory="/var/www" fstype="ext4" --group apche
+pcs resource create httpd_vip IPaddr2 ip=192.168.144.203 cidr_netmask=24 --group apache
+pcs resource create httpd_ser apache configfile="/etc/httpd/conf/httpd.conf" statusurl="http://127.0.0.1/server-status" --group apache
+pcs ststus
+#web browser:
+##search virtual machine ip address 
+##search virtual machine ip address with 2224 default port 
+Node1: pcs node standby node1.demo.lab
+
